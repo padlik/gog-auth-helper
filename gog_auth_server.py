@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-gog_auth_server.py — Web UI for gog re-authentication over VPN.
+gog_auth_server.py — Web UI for gog two-step remote OAuth over VPN.
 
 Flow:
   1. Open http://<box-vpn-ip>:7080 on iPhone
-  2. Tap "Start Auth" — box runs gog --manual and shows the Google OAuth URL
+  2. Tap "Start Auth" — box runs gog --remote --step 1, shows the Google OAuth URL
   3. Tap the link, sign in — Safari lands on a failed 127.0.0.1 page
-  4. Copy the full URL from Safari's address bar, paste it here, tap Submit
+  4. Copy the full URL from Safari's address bar, paste it, tap Submit
+  5. Server runs gog --remote --step 2 with the redirect URL
 
 Usage:
     python3 gog_auth_server.py --account me@example.com
-    python3 gog_auth_server.py --account me@example.com --services gmail,calendar --port 7080
+    python3 gog_auth_server.py --account me@example.com --services gmail,calendar --port 7080 --ttl 540
 """
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 import threading
@@ -26,97 +26,98 @@ from urllib.parse import urlparse
 DEFAULT_PORT     = 7080
 DEFAULT_ACCOUNT  = ""
 DEFAULT_SERVICES = "user"
-
-GOOGLE_URL_RE = re.compile(r"https?://accounts\.google\.[a-z.]+/\S+")
+DEFAULT_TTL      = 540
 
 state = {
-    "phase":   "idle",
-    "gog_url": None,
-    "log":     [],
-    "result":  None,
-    "proc":    None,
+    "phase":      "idle",
+    "auth_url":   None,
+    "expires_at": None,
+    "log":        [],
+    "result":     None,
 }
 _lock = threading.Lock()
 
 
-def auth_worker(account: str, services: str):
-    cmd = f"gog auth add {account} --services {services} --manual"
-    with _lock:
-        state.update(phase="running", gog_url=None, log=[], result=None, proc=None)
+def log(cmd: str, rc: int, stdout: str, stderr: str, t0: float):
+    elapsed = time.time() - t0
+    ts = time.strftime("[%H:%M:%S]")
+    out = f"{ts} gog {cmd}  exit={rc}  {elapsed:.2f}s"
+    if stdout.strip():
+        first_line = stdout.strip().split("\n")[0]
+        out += f"  out={first_line[:120]}"
+    if stderr.strip():
+        first_line = stderr.strip().split("\n")[0]
+        out += f"  err={first_line[:120]}"
+    print(out, flush=True)
+
+
+def run_step1(account: str, services: str):
+    """Returns (auth_url, error_msg, log_lines)."""
+    cmd = [
+        "gog", "auth", "add", account,
+        "--services", services,
+        "--remote", "--step", "1",
+    ]
+    t0 = time.time()
     try:
-        proc = subprocess.Popen(
-            cmd, shell=True,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-        )
-        with _lock:
-            state["proc"] = proc
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        log("step1", -1, "", "timeout", t0)
+        return (None, "gog step 1 timed out after 30s", [])
+    except FileNotFoundError:
+        log("step1", -1, "", "command not found", t0)
+        return (None, "gog not found — is gogcli installed?", [])
 
-        found = False
-        for line in proc.stdout:
-            line = line.rstrip()
-            with _lock:
-                state["log"].append(line)
-            m = GOOGLE_URL_RE.search(line)
-            if m:
-                with _lock:
-                    state["gog_url"] = m.group(0)
-                    state["phase"]   = "need_redirect"
-                found = True
-                break
+    log("step1", r.returncode, r.stdout, r.stderr, t0)
+    log_lines = (r.stdout + r.stderr).strip().splitlines()
 
-        if not found:
-            proc.wait()
-            with _lock:
-                state["phase"]  = "error"
-                state["result"] = "No Google OAuth URL found in gog output. Check log."
-            return
+    if r.returncode != 0:
+        err = r.stderr.strip() or r.stdout.strip() or f"step 1 exited with code {r.returncode}"
+        return (None, err, log_lines)
 
-        while True:
-            with _lock:
-                phase = state["phase"]
-            if phase == "submitting":
-                break
-            if proc.poll() is not None:
-                with _lock:
-                    state["phase"]  = "error"
-                    state["result"] = "gog process exited before redirect was received."
-                return
-            time.sleep(0.25)
+    auth_url = None
+    for line in r.stdout.strip().split("\n"):
+        if line.startswith("auth_url\t"):
+            auth_url = line.split("\t", 1)[1].strip()
+            break
 
-        rest = proc.stdout.read()
-        proc.wait()
-        with _lock:
-            for l in rest.splitlines():
-                state["log"].append(l)
-            if proc.returncode == 0:
-                state["phase"]  = "done"
-                state["result"] = "Authentication successful \u2713"
-            else:
-                state["phase"]  = "error"
-                state["result"] = f"gog exited with code {proc.returncode}. Check log."
-
-    except Exception as exc:
-        with _lock:
-            state["phase"]  = "error"
-            state["result"] = str(exc)
+    if not auth_url:
+        return (None, "No auth_url in gog step 1 output. Check log.", log_lines)
+    return (auth_url, None, log_lines)
 
 
-def feed_redirect_url(redirect_url: str):
-    with _lock:
-        proc  = state["proc"]
-        phase = state["phase"]
-    if phase != "need_redirect" or proc is None:
-        return False, "Not waiting for a redirect URL right now."
+def run_step2(account: str, services: str, redirect_url: str):
+    """Returns (ok, result_info, error_msg, log_lines)."""
+    cmd = [
+        "gog", "auth", "add", account,
+        "--services", services,
+        "--remote", "--step", "2",
+        "--auth-url", redirect_url,
+    ]
+    t0 = time.time()
     try:
-        proc.stdin.write(redirect_url + "\n")
-        proc.stdin.flush()
-        proc.stdin.close()
-        with _lock:
-            state["phase"] = "submitting"
-        return True, "OK"
-    except Exception as exc:
-        return False, str(exc)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        log("step2", -1, "", "timeout", t0)
+        return (False, None, "gog step 2 timed out after 30s", [])
+    except FileNotFoundError:
+        log("step2", -1, "", "command not found", t0)
+        return (False, None, "gog not found — is gogcli installed?", [])
+
+    log("step2", r.returncode, r.stdout, r.stderr, t0)
+    log_lines = (r.stdout + r.stderr).strip().splitlines()
+
+    if r.returncode != 0:
+        err = r.stderr.strip() or r.stdout.strip() or f"step 2 exited with code {r.returncode}"
+        return (False, None, err, log_lines)
+
+    info = {}
+    for line in r.stdout.strip().split("\n"):
+        if "\t" in line:
+            k, v = line.split("\t", 1)
+            info[k.strip()] = v.strip()
+
+    return (True, info, None, log_lines)
 
 
 HTML = """<!DOCTYPE html>
@@ -139,7 +140,6 @@ h1{font-size:1.2rem;font-weight:700;margin-bottom:3px}
 .badge{display:inline-block;padding:3px 10px;border-radius:99px;font-size:.76rem;
   font-weight:600;margin-bottom:16px}
 .idle{background:#2a2d3a;color:var(--mt)}
-.running{background:#1e2a40;color:var(--bl)}
 .need_redirect{background:#1e2d2a;color:var(--gr)}
 .submitting{background:#1e2a40;color:var(--bl)}
 .done{background:#1a2e24;color:var(--gr)}
@@ -147,9 +147,10 @@ h1{font-size:1.2rem;font-weight:700;margin-bottom:3px}
 .btn{width:100%;padding:14px;border:none;border-radius:10px;font-size:1rem;
   font-weight:600;cursor:pointer;transition:opacity .15s}
 .btn:active{opacity:.75}
+.btn-sm{padding:12px;font-size:.9rem}
 .bp{background:var(--bl);color:#fff}
 .bg{background:var(--gr);color:#000}
-.bm{background:var(--bdr);color:var(--mt);cursor:default}
+.bm{background:var(--bdr);color:var(--mt)}
 .url-box{background:#11131e;border:1px solid var(--bdr);border-radius:10px;
   padding:14px;margin:12px 0;word-break:break-all;font-size:.8rem;line-height:1.6}
 .url-box a{color:var(--bl);text-decoration:none;font-size:.85rem}
@@ -159,6 +160,11 @@ textarea{width:100%;padding:11px 13px;border-radius:9px;border:1px solid var(--b
   background:#11131e;color:var(--tx);font-size:.8rem;margin:6px 0 12px;outline:none;
   display:block;resize:vertical;min-height:72px;font-family:monospace;line-height:1.5}
 textarea:focus{border-color:var(--bl)}
+.timer{font-size:.78rem;color:var(--mt);margin-bottom:10px;font-variant-numeric:tabular-nums}
+.timer strong{color:var(--tx)}
+.timer.warn strong{color:var(--rd)}
+.info-row{font-size:.78rem;color:var(--mt);margin-top:6px}
+.info-row strong{color:var(--tx)}
 .result{margin-top:14px;padding:12px 14px;border-radius:10px;font-size:.88rem;line-height:1.5}
 .result.done{background:#1a2e24;color:var(--gr);border:1px solid #2a4a3a}
 .result.error{background:#2e1a1a;color:var(--rd);border:1px solid #4a2a2a}
@@ -173,7 +179,6 @@ textarea:focus{border-color:var(--bl)}
 @keyframes sp{to{transform:rotate(360deg)}}
 .panel{display:none}
 .panel.active{display:block}
-.panel-submit{display:block}
 </style>
 </head>
 <body>
@@ -183,23 +188,26 @@ textarea:focus{border-color:var(--bl)}
   <span id="badge" class="badge idle">idle</span>
 
   <div id="panel-idle" class="panel active">
-    <button class="btn bp" onclick="startAuth()">Start authentication</button>
-  </div>
-
-  <div id="panel-running" class="panel">
-    <button class="btn bm"><span class="spin"></span>Launching gog&hellip;</button>
+    <button class="btn bp" onclick="doStep1()">Start authentication</button>
   </div>
 
   <div id="panel-redirect" class="panel">
-    <p class="step"><b>1</b> &mdash; Open Google sign-in:</p>
-    <div class="url-box">
-      <a id="gog-link" href="#" target="_blank">&#128279;&nbsp;Tap to open Google sign-in &nearr;</a>
+    <div id="redirect-active">
+      <p class="step"><b>1</b> &mdash; Open Google sign-in:</p>
+      <div class="url-box">
+        <a id="gog-link" href="#" target="_blank">&#128279;&nbsp;Tap to open Google sign-in &nearr;</a>
+      </div>
+      <p class="timer" id="timer"></p>
+      <p class="step"><b>2</b> &mdash; Sign in. Safari will land on a page that fails to load&nbsp;(<code>127.0.0.1&hellip;</code>).</p>
+      <p class="step"><b>3</b> &mdash; Copy the full URL from the address bar and paste it below:</p>
+      <textarea id="ru" placeholder="http://127.0.0.1:&hellip;/oauth2/callback?state=&hellip;&code=&hellip;"
+        autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+      <button class="btn bg" id="btn-submit" onclick="doStep2()">Submit &rarr;</button>
     </div>
-    <p class="step"><b>2</b> &mdash; Sign in. Safari will land on a page that fails to load&nbsp;(<code>127.0.0.1&hellip;</code>).</p>
-    <p class="step"><b>3</b> &mdash; Copy the full URL from the address bar and paste it below:</p>
-    <textarea id="ru" placeholder="http://127.0.0.1:&hellip;/?code=&hellip;"
-      autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
-    <button class="btn bg" id="btn-submit" onclick="submitRedirect()">Submit &rarr;</button>
+    <div id="redirect-expired" style="display:none">
+      <div class="result error">&#9200;&nbsp;Authentication link expired</div>
+      <button class="btn bp btn-sm" style="margin-top:14px" onclick="doStep1()">Restart step 1</button>
+    </div>
   </div>
 
   <div id="panel-submitting" class="panel">
@@ -208,12 +216,13 @@ textarea:focus{border-color:var(--bl)}
 
   <div id="panel-done" class="panel">
     <div class="result done" id="result-done"></div>
-    <button class="btn bp" style="margin-top:14px" onclick="startAuth()">Auth again</button>
+    <div id="info-done"></div>
+    <button class="btn bp btn-sm" style="margin-top:14px" onclick="doStep1()">Auth again</button>
   </div>
 
   <div id="panel-error" class="panel">
     <div class="result error" id="result-error"></div>
-    <button class="btn bp" style="margin-top:14px" onclick="startAuth()">Try again</button>
+    <button class="btn bp btn-sm" style="margin-top:14px" onclick="doStep1()">Try again</button>
   </div>
 
   <button class="log-toggle" onclick="toggleLog()">Show raw log</button>
@@ -221,19 +230,20 @@ textarea:focus{border-color:var(--bl)}
 </div>
 
 <script>
-const panels={idle:'panel-idle',running:'panel-running',need_redirect:'panel-redirect',
+var panels={idle:'panel-idle',need_redirect:'panel-redirect',
   submitting:'panel-submitting',done:'panel-done',error:'panel-error'};
 
-const label={idle:'idle',running:'connecting\u2026',need_redirect:'waiting for redirect',
+var label={idle:'idle',need_redirect:'waiting for redirect',
   submitting:'processing\u2026',done:'authenticated \u2713',error:'error'};
 
-function showPanel(phase){
+var timerId=null;
+
+function show(p){
   for(var k in panels) document.getElementById(panels[k]).classList.remove('active');
-  var el=document.getElementById(panels[phase]);
+  var el=document.getElementById(panels[p]);
   if(el) el.classList.add('active');
 }
 
-var _curPhase=null;
 function render(s){
   document.getElementById('sub').textContent =
     'Account: '+(s.account||'\u2014')+' \u00b7 Services: '+(s.services||'\u2014');
@@ -242,55 +252,82 @@ function render(s){
   badge.className='badge '+s.phase;
   badge.textContent=label[s.phase]||s.phase;
 
-  if(_curPhase!==s.phase){
-    _curPhase=s.phase;
-    showPanel(s.phase);
-  }
+  show(s.phase);
 
-  if(s.phase==='need_redirect'&&s.gog_url){
-    document.getElementById('gog-link').href=s.gog_url;
+  if(s.log&&s.log.length) document.getElementById('log').textContent=s.log.join('\n');
+
+  if(s.phase==='need_redirect'){
+    document.getElementById('gog-link').href=s.auth_url||'#';
+    startTimer(s.expires_at);
   }
   if(s.phase==='done'){
-    document.getElementById('result-done').textContent='\u2713\u00a0'+s.result;
-    stopPoll();
+    clearTimer();
+    document.getElementById('result-done').textContent='\u2713\u00a0Authentication successful';
+    var info='';
+    if(s.info){
+      if(s.info.email) info+='<div class="info-row"><strong>Email:</strong> '+s.info.email+'</div>';
+      if(s.info.client) info+='<div class="info-row"><strong>Client:</strong> '+s.info.client+'</div>';
+      if(s.info.services) info+='<div class="info-row"><strong>Services:</strong> '+s.info.services+'</div>';
+    }
+    document.getElementById('info-done').innerHTML=info;
   }
   if(s.phase==='error'){
+    clearTimer();
     document.getElementById('result-error').textContent='\u2717\u00a0'+s.result;
-    stopPoll();
   }
-  if(s.log&&s.log.length) document.getElementById('log').textContent=s.log.join('\\n');
 }
 
-async function startAuth(){
+function clearTimer(){ if(timerId){clearInterval(timerId);timerId=null;} }
+
+function startTimer(exp){
+  clearTimer();
+  if(!exp) return;
+  var active=document.getElementById('redirect-active');
+  var expired=document.getElementById('redirect-expired');
+  var el=document.getElementById('timer');
+  active.style.display='block';
+  expired.style.display='none';
+
+  function tick(){
+    var left=Math.max(0,Math.ceil(exp-Date.now()/1000));
+    var m=Math.floor(left/60), s=left%60;
+    el.textContent='Link expires in: '+(m?m+'m ':'')+s+'s';
+    el.className='timer'+(left<=60?' warn':'');
+    if(left<=0){
+      clearTimer();
+      active.style.display='none';
+      expired.style.display='block';
+    }
+  }
+  tick();
+  timerId=setInterval(tick,1000);
+}
+
+async function doStep1(){
+  show('submitting');
+  clearTimer();
   var el=document.getElementById('ru');
   if(el) el.value='';
-  await fetch('/start',{method:'POST'});
-  startPoll();
+  try{
+    var r=await fetch('/step1',{method:'POST'});
+    var s=await r.json();
+    render(s);
+  }catch(e){render({phase:'error',result:'Network error \u2014 check VPN connection',log:[]});}
 }
 
-async function submitRedirect(){
+async function doStep2(){
   var el=document.getElementById('ru');
   var url=(el?el.value:'').trim();
   if(!url){alert('Paste the redirect URL first.');return;}
-  var r=await fetch('/redirect',{method:'POST',
-    headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
-  var d=await r.json();
-  if(!d.ok){alert('Error: '+d.msg);return;}
-  showPanel('submitting');
-  startPoll();
+  show('submitting');
+  try{
+    var r=await fetch('/step2',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    var s=await r.json();
+    render(s);
+  }catch(e){render({phase:'error',result:'Network error \u2014 check VPN connection',log:[]});}
 }
 
-var timer=null,active=false;
-function startPoll(){if(!active){active=true;poll();}}
-function stopPoll(){active=false;clearTimeout(timer);}
-async function poll(){
-  if(!active)return;
-  try{
-    var s=await fetch('/state').then(function(r){return r.json();});
-    render(s);
-    if(s.phase!=='done'&&s.phase!=='error') timer=setTimeout(poll,800);
-  }catch(e){timer=setTimeout(poll,2000);}
-}
 function toggleLog(){
   var el=document.getElementById('log');
   el.style.display=el.style.display==='none'?'block':'none';
@@ -307,6 +344,7 @@ CORS = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
 }
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
@@ -330,6 +368,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _snapshot(self):
+        with _lock:
+            return {k: v for k, v in state.items()}
+
     def do_OPTIONS(self):
         self.send_response(204)
         for k, v in CORS.items():
@@ -341,8 +383,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._send(HTML.encode(), "text/html; charset=utf-8")
         elif path == "/state":
-            with _lock:
-                snap = {k: v for k, v in state.items() if k != "proc"}
+            snap = self._snapshot()
             snap["account"]  = self.server.account
             snap["services"] = self.server.services
             self._json(snap)
@@ -352,43 +393,107 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
 
-        if path == "/start":
+        if path == "/step1":
             with _lock:
                 phase = state["phase"]
-            if phase in ("running", "need_redirect", "submitting"):
-                self._json({"ok": False, "msg": "Auth already in progress"})
+            if phase == "submitting":
+                self._json(self._error_snap("Auth already in progress"))
                 return
-            threading.Thread(
-                target=auth_worker,
-                args=(self.server.account, self.server.services),
-                daemon=True,
-            ).start()
-            self._json({"ok": True})
 
-        elif path == "/redirect":
+            account = self.server.account
+            services = self.server.services
+            ttl = self.server.ttl
+
+            auth_url, err, logs = run_step1(account, services)
+
+            with _lock:
+                state["log"] = logs
+                if err:
+                    state["phase"] = "error"
+                    state["result"] = err
+                    state["auth_url"] = None
+                    state["expires_at"] = None
+                else:
+                    state["phase"] = "need_redirect"
+                    state["auth_url"] = auth_url
+                    state["expires_at"] = time.time() + ttl
+                    state["result"] = None
+            self._json(self._snapshot())
+
+        elif path == "/step2":
             body = self._body()
-            url  = body.get("url", "").strip()
-            if not url:
-                self._json({"ok": False, "msg": "No URL provided"}, 400)
+            redirect_url = body.get("url", "").strip()
+
+            with _lock:
+                phase = state["phase"]
+                expires = state["expires_at"]
+
+            if phase != "need_redirect":
+                self._json(self._error_snap("No authentication link active — run step 1 first"))
                 return
-            if "code=" not in url and "error=" not in url:
-                self._json({"ok": False, "msg": "Doesn't look like an OAuth callback (no code= parameter)"}, 400)
+
+            if expires and time.time() > expires:
+                with _lock:
+                    state["phase"] = "error"
+                    state["result"] = "Authentication link has expired. Restart step 1."
+                self._json(self._snapshot())
                 return
-            ok, msg = feed_redirect_url(url)
-            self._json({"ok": ok, "msg": msg}, 200 if ok else 409)
+
+            if not redirect_url:
+                self._json(self._error_snap("No URL provided"))
+                return
+
+            if "code=" not in redirect_url:
+                self._json(self._error_snap(
+                    "Doesn't look like an OAuth callback (no code= parameter)"))
+                return
+
+            if "state=" not in redirect_url:
+                self._json(self._error_snap(
+                    "Redirect URL must include state= parameter for --remote auth"))
+                return
+
+            account = self.server.account
+            services = self.server.services
+
+            ok, info, err, logs = run_step2(account, services, redirect_url)
+
+            with _lock:
+                state["log"] = logs
+                if ok:
+                    state["phase"] = "done"
+                    state["result"] = "Authentication successful"
+                    state["auth_url"] = None
+                    state["expires_at"] = None
+                else:
+                    state["phase"] = "error"
+                    state["result"] = err
+                    state["auth_url"] = None
+                    state["expires_at"] = None
+
+            snap = self._snapshot()
+            if ok:
+                snap["info"] = info
+            self._json(snap)
 
         else:
             self.send_error(404)
 
+    def _error_snap(self, msg):
+        return {"phase": "error", "result": msg, "auth_url": None,
+                "expires_at": None, "log": []}
+
 
 def main():
-    ap = argparse.ArgumentParser(description="gog OAuth tunnel \u2014 access from iPhone over VPN")
+    ap = argparse.ArgumentParser(description="gog OAuth helper \u2014 two-step remote auth via iPhone over VPN")
     ap.add_argument("--port",     type=int, default=DEFAULT_PORT)
     ap.add_argument("--host",     type=str, default="0.0.0.0")
     ap.add_argument("--account",  type=str, default=DEFAULT_ACCOUNT,
                     help="Account passed to: gog auth add <ACCOUNT>")
     ap.add_argument("--services", type=str, default=DEFAULT_SERVICES,
                     help="Passed to --services flag (default: user)")
+    ap.add_argument("--ttl",      type=int, default=DEFAULT_TTL,
+                    help="Authentication link lifetime in seconds (default: 540)")
     args = ap.parse_args()
 
     if not args.account:
@@ -403,8 +508,8 @@ def main():
     except Exception:
         ips = []
 
-    print(f"\n  gog Auth \u2014 port {args.port}")
-    print(f"  Command: gog auth add {args.account} --services {args.services} --manual\n")
+    print(f"\n  gog Auth \u2014 port {args.port}  ttl={args.ttl}s")
+    print(f"  Account: {args.account}  Services: {args.services}\n")
     for ip in ips:
         print(f"  \u2192 http://{ip}:{args.port}   \u2190 open on iPhone (VPN on)")
     print(f"  \u2192 http://localhost:{args.port}\n")
@@ -413,6 +518,7 @@ def main():
     srv.port     = args.port
     srv.account  = args.account
     srv.services = args.services
+    srv.ttl      = args.ttl
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
