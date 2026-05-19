@@ -185,7 +185,11 @@ textarea:focus{border-color:var(--bl)}
 </div>
 
 <script>
+let _lastPhase=null;
 function render(s){
+  if(_lastPhase===s.phase&&s.phase==='need_redirect') return;
+  _lastPhase=s.phase;
+
   document.getElementById('sub').textContent =
     'Account: '+(s.account||'—')+' · Services: '+(s.services||'—');
 
@@ -254,7 +258,7 @@ async function poll(){
   try{
     const s=await fetch('/state').then(r=>r.json());
     render(s);
-    if(s.phase!=='done'&&s.phase!=='error'&&s.phase!=='need_redirect') timer=setTimeout(poll,800);
+    if(s.phase!=='done'&&s.phase!=='error') timer=setTimeout(poll,800);
   }catch(e){timer=setTimeout(poll,2000);}
 }
 function toggleLog(){
