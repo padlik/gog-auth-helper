@@ -1,0 +1,19 @@
+[Unit]
+Description=gog Auth Web Helper (VPN-accessible re-authentication server)
+After=network.target
+
+[Service]
+Type=simple
+# ── Adjust these two lines to match your setup ───────────────────────────────
+User=YOUR_USER
+ExecStart=/usr/bin/python3 /home/YOUR_USER/gog_auth_server.py --account me@example.com --services user
+# ─────────────────────────────────────────────────────────────────────────────
+
+WorkingDirectory=/home/YOUR_USER
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
