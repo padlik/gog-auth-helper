@@ -324,6 +324,7 @@ async function doStep2(){
   var el=document.getElementById('ru');
   var url=(el?el.value:'').trim();
   if(!url){alert('Paste the redirect URL first.');return;}
+  if(!/^https?:\/\//i.test(url)){url='http://'+url;el.value=url;}
   show('submitting');
   try{
     var r=await fetch('/step2',{method:'POST',
@@ -428,6 +429,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/step2":
             body = self._body()
             redirect_url = body.get("url", "").strip()
+
+            if redirect_url and "://" not in redirect_url:
+                redirect_url = "http://" + redirect_url
 
             with _lock:
                 phase = state["phase"]
