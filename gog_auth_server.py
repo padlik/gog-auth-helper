@@ -4,7 +4,7 @@ gog_auth_server.py — Web UI for gog re-authentication over VPN.
 
 Flow:
   1. Open http://<box-vpn-ip>:7080 on iPhone
-  2. Tap "Start Auth" — box runs gog and shows the Google OAuth URL
+  2. Tap "Start Auth" — box runs gog --manual and shows the Google OAuth URL
   3. Tap the link, sign in — Safari lands on a failed 127.0.0.1 page
   4. Copy the full URL from Safari's address bar, paste it here, tap Submit
 
@@ -24,13 +24,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
 DEFAULT_PORT     = 7080
-DEFAULT_ACCOUNT  = ""       # or hardcode: "me@example.com"
+DEFAULT_ACCOUNT  = ""
 DEFAULT_SERVICES = "user"
 
 GOOGLE_URL_RE = re.compile(r"https?://accounts\.google\.[a-z.]+/\S+")
 
 state = {
-    "phase":   "idle",   # idle | running | need_redirect | submitting | done | error
+    "phase":   "idle",
     "gog_url": None,
     "log":     [],
     "result":  None,
@@ -72,7 +72,6 @@ def auth_worker(account: str, services: str):
                 state["result"] = "No Google OAuth URL found in gog output. Check log."
             return
 
-        # Wait for /redirect
         while True:
             with _lock:
                 phase = state["phase"]
@@ -92,7 +91,7 @@ def auth_worker(account: str, services: str):
                 state["log"].append(l)
             if proc.returncode == 0:
                 state["phase"]  = "done"
-                state["result"] = "Authentication successful ✓"
+                state["result"] = "Authentication successful \u2713"
             else:
                 state["phase"]  = "error"
                 state["result"] = f"gog exited with code {proc.returncode}. Check log."
@@ -172,101 +171,132 @@ textarea:focus{border-color:var(--bl)}
   border-top-color:var(--bl);border-radius:50%;animation:sp .7s linear infinite;
   vertical-align:middle;margin-right:5px}
 @keyframes sp{to{transform:rotate(360deg)}}
+.panel{display:none}
+.panel.active{display:block}
+.panel-submit{display:block}
 </style>
 </head>
 <body>
 <div class="card">
   <h1>&#128273; gog Auth</h1>
-  <p class="sub" id="sub">…</p>
+  <p class="sub" id="sub">&hellip;</p>
   <span id="badge" class="badge idle">idle</span>
-  <div id="main"></div>
+
+  <div id="panel-idle" class="panel active">
+    <button class="btn bp" onclick="startAuth()">Start authentication</button>
+  </div>
+
+  <div id="panel-running" class="panel">
+    <button class="btn bm"><span class="spin"></span>Launching gog&hellip;</button>
+  </div>
+
+  <div id="panel-redirect" class="panel">
+    <p class="step"><b>1</b> &mdash; Open Google sign-in:</p>
+    <div class="url-box">
+      <a id="gog-link" href="#" target="_blank">&#128279;&nbsp;Tap to open Google sign-in &nearr;</a>
+    </div>
+    <p class="step"><b>2</b> &mdash; Sign in. Safari will land on a page that fails to load&nbsp;(<code>127.0.0.1&hellip;</code>).</p>
+    <p class="step"><b>3</b> &mdash; Copy the full URL from the address bar and paste it below:</p>
+    <textarea id="ru" placeholder="http://127.0.0.1:&hellip;/?code=&hellip;"
+      autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+    <button class="btn bg" id="btn-submit" onclick="submitRedirect()">Submit &rarr;</button>
+  </div>
+
+  <div id="panel-submitting" class="panel">
+    <button class="btn bm"><span class="spin"></span>Completing auth&hellip;</button>
+  </div>
+
+  <div id="panel-done" class="panel">
+    <div class="result done" id="result-done"></div>
+    <button class="btn bp" style="margin-top:14px" onclick="startAuth()">Auth again</button>
+  </div>
+
+  <div id="panel-error" class="panel">
+    <div class="result error" id="result-error"></div>
+    <button class="btn bp" style="margin-top:14px" onclick="startAuth()">Try again</button>
+  </div>
+
   <button class="log-toggle" onclick="toggleLog()">Show raw log</button>
   <div class="log" id="log"></div>
 </div>
 
 <script>
-let _lastPhase=null;
+const panels={idle:'panel-idle',running:'panel-running',need_redirect:'panel-redirect',
+  submitting:'panel-submitting',done:'panel-done',error:'panel-error'};
+
+const label={idle:'idle',running:'connecting\u2026',need_redirect:'waiting for redirect',
+  submitting:'processing\u2026',done:'authenticated \u2713',error:'error'};
+
+function showPanel(phase){
+  for(var k in panels) document.getElementById(panels[k]).classList.remove('active');
+  var el=document.getElementById(panels[phase]);
+  if(el) el.classList.add('active');
+}
+
+var _curPhase=null;
 function render(s){
-  if(_lastPhase===s.phase&&s.phase==='need_redirect') return;
-  _lastPhase=s.phase;
-
   document.getElementById('sub').textContent =
-    'Account: '+(s.account||'—')+' · Services: '+(s.services||'—');
+    'Account: '+(s.account||'\u2014')+' \u00b7 Services: '+(s.services||'\u2014');
 
-  const badge=document.getElementById('badge');
+  var badge=document.getElementById('badge');
   badge.className='badge '+s.phase;
-  const L={idle:'idle',running:'connecting…',need_redirect:'waiting for redirect',
-    submitting:'processing…',done:'authenticated ✓',error:'error'};
-  badge.textContent=L[s.phase]||s.phase;
+  badge.textContent=label[s.phase]||s.phase;
 
-  const mc=document.getElementById('main');
-
-  if(s.phase==='idle'){
-    mc.innerHTML=`<button class="btn bp" onclick="startAuth()">Start authentication</button>`;
-
-  }else if(s.phase==='running'){
-    mc.innerHTML=`<button class="btn bm"><span class="spin"></span>Launching gog…</button>`;
-
-  }else if(s.phase==='need_redirect'){
-    mc.innerHTML=`
-      <p class="step"><b>1</b> &mdash; Open Google sign-in:</p>
-      <div class="url-box">
-        <a href="${s.gog_url}" target="_blank">&#128279;&nbsp;Tap to open Google sign-in &nearr;</a>
-      </div>
-      <p class="step"><b>2</b> &mdash; Sign in. Safari will land on a page that fails to load&nbsp;(<code>127.0.0.1…</code>).</p>
-      <p class="step"><b>3</b> &mdash; Copy the full URL from the address bar and paste it below:</p>
-      <textarea id="ru" placeholder="http://127.0.0.1:…/?code=…" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
-      <button class="btn bg" onclick="submitRedirect()">Submit &rarr;</button>`;
-
-  }else if(s.phase==='submitting'){
-    mc.innerHTML=`<button class="btn bm"><span class="spin"></span>Completing auth…</button>`;
-
-  }else if(s.phase==='done'){
-    mc.innerHTML=`<div class="result done">&#10003;&nbsp;${s.result}</div>
-      <button class="btn bp" style="margin-top:14px" onclick="startAuth()">Auth again</button>`;
-    stopPoll();
-
-  }else if(s.phase==='error'){
-    mc.innerHTML=`<div class="result error">&#10007;&nbsp;${s.result}</div>
-      <button class="btn bp" style="margin-top:14px" onclick="startAuth()">Try again</button>`;
-    stopPoll();
+  if(_curPhase!==s.phase){
+    _curPhase=s.phase;
+    showPanel(s.phase);
   }
 
-  if(s.log?.length) document.getElementById('log').textContent=s.log.join('\\n');
+  if(s.phase==='need_redirect'&&s.gog_url){
+    document.getElementById('gog-link').href=s.gog_url;
+  }
+  if(s.phase==='done'){
+    document.getElementById('result-done').textContent='\u2713\u00a0'+s.result;
+    stopPoll();
+  }
+  if(s.phase==='error'){
+    document.getElementById('result-error').textContent='\u2717\u00a0'+s.result;
+    stopPoll();
+  }
+  if(s.log&&s.log.length) document.getElementById('log').textContent=s.log.join('\\n');
 }
 
 async function startAuth(){
+  var el=document.getElementById('ru');
+  if(el) el.value='';
   await fetch('/start',{method:'POST'});
   startPoll();
 }
 
 async function submitRedirect(){
-  const url=(document.getElementById('ru')?.value||'').trim();
+  var el=document.getElementById('ru');
+  var url=(el?el.value:'').trim();
   if(!url){alert('Paste the redirect URL first.');return;}
-  const r=await fetch('/redirect',{method:'POST',
+  var r=await fetch('/redirect',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
-  const d=await r.json();
-  if(!d.ok) alert('Error: '+d.msg);
-  else startPoll();
+  var d=await r.json();
+  if(!d.ok){alert('Error: '+d.msg);return;}
+  showPanel('submitting');
+  startPoll();
 }
 
-let timer=null,active=false;
+var timer=null,active=false;
 function startPoll(){if(!active){active=true;poll();}}
 function stopPoll(){active=false;clearTimeout(timer);}
 async function poll(){
   if(!active)return;
   try{
-    const s=await fetch('/state').then(r=>r.json());
+    var s=await fetch('/state').then(function(r){return r.json();});
     render(s);
     if(s.phase!=='done'&&s.phase!=='error') timer=setTimeout(poll,800);
   }catch(e){timer=setTimeout(poll,2000);}
 }
 function toggleLog(){
-  const el=document.getElementById('log');
+  var el=document.getElementById('log');
   el.style.display=el.style.display==='none'?'block':'none';
 }
 
-fetch('/state').then(r=>r.json()).then(render);
+fetch('/state').then(function(r){return r.json();}).then(render);
 </script>
 </body>
 </html>"""
@@ -352,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="gog OAuth tunnel — access from iPhone over VPN")
+    ap = argparse.ArgumentParser(description="gog OAuth tunnel \u2014 access from iPhone over VPN")
     ap.add_argument("--port",     type=int, default=DEFAULT_PORT)
     ap.add_argument("--host",     type=str, default="0.0.0.0")
     ap.add_argument("--account",  type=str, default=DEFAULT_ACCOUNT,
@@ -362,7 +392,7 @@ def main():
     args = ap.parse_args()
 
     if not args.account:
-        print("\n  ⚠  Specify --account me@example.com  (or set DEFAULT_ACCOUNT in the script)\n")
+        print("\n  \u26a0  Specify --account me@example.com  (or set DEFAULT_ACCOUNT in the script)\n")
         ap.print_help()
         sys.exit(1)
 
@@ -373,11 +403,11 @@ def main():
     except Exception:
         ips = []
 
-    print(f"\n  gog Auth — port {args.port}")
+    print(f"\n  gog Auth \u2014 port {args.port}")
     print(f"  Command: gog auth add {args.account} --services {args.services} --manual\n")
     for ip in ips:
-        print(f"  → http://{ip}:{args.port}   ← open on iPhone (VPN on)")
-    print(f"  → http://localhost:{args.port}\n")
+        print(f"  \u2192 http://{ip}:{args.port}   \u2190 open on iPhone (VPN on)")
+    print(f"  \u2192 http://localhost:{args.port}\n")
 
     srv = HTTPServer((args.host, args.port), Handler)
     srv.port     = args.port
