@@ -259,7 +259,7 @@ function render(s){
 
   show(s.phase);
 
-  if(s.log&&s.log.length) document.getElementById('log').textContent=s.log.join('\n');
+  if(s.log&&s.log.length) document.getElementById('log').textContent=s.log.join('\\n');
 
   if(s.phase==='need_redirect'){
     document.getElementById('gog-link').href=s.auth_url||'#';
