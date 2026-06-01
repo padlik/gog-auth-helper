@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -508,6 +509,13 @@ def main():
     if not args.account:
         print("\n  \u26a0  Specify --account me@example.com  (or set DEFAULT_ACCOUNT in the script)\n")
         ap.print_help()
+        sys.exit(1)
+
+    required_env = ["GOG_ACCOUNT", "GOG_KEYRING_BACKEND", "GOG_KEYRING_PASSWORD"]
+    missing = [v for v in required_env if v not in os.environ]
+    if missing:
+        print(f"\n  \u26a0  Missing environment variables: {', '.join(missing)}")
+        print(   "     Set them before running the server.\n")
         sys.exit(1)
 
     try:
