@@ -127,7 +127,8 @@ def run_step2(account: str, services: str, redirect_url: str):
 
 
 def run_verify(account: str):
-    """Returns (ok, result_or_error, log_lines)."""
+    """Returns (ok, result_or_error, log_lines).  On success, the result dict
+    includes a ``status`` key populated from ``gog status`` output."""
     cmd = ["gog", "auth", "list", "--check", "--json", "--no-input", "--account", account]
     t0 = time.time()
     try:
@@ -150,6 +151,29 @@ def run_verify(account: str):
     except json.JSONDecodeError:
         return (False, "Could not parse verification output", log_lines)
 
+    # Also run gog status for diagnostic info
+    status_lines = []
+    try:
+        sr = subprocess.run(
+            ["gog", "status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        log("status", sr.returncode, sr.stdout, sr.stderr, t0)
+        if sr.returncode == 0:
+            data["status"] = sr.stdout.strip()
+            status_lines = sr.stdout.strip().splitlines()
+        else:
+            err = sr.stderr.strip() or sr.stdout.strip()
+            data["status"] = f"error: {err}" if err else "status command failed"
+            if err:
+                status_lines = [f"status error: {err}"]
+        log_lines.extend(status_lines)
+    except subprocess.TimeoutExpired:
+        log("status", -1, "", "timeout", t0)
+        data["status"] = "timeout"
+    except FileNotFoundError:
+        log("status", -1, "", "command not found", t0)
+
     return (True, data, log_lines)
 
 
@@ -170,46 +194,46 @@ body{background:var(--bg);color:var(--tx);
     max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
   overscroll-behavior:none;-webkit-overflow-scrolling:touch}
 .card{background:var(--card);border:1px solid var(--bdr);border-radius:16px;
-  padding:24px 20px;width:100%;max-width:480px}
-h1{font-size:1.25rem;font-weight:700;margin-bottom:3px}
-.sub{color:var(--mt);font-size:.85rem;margin-bottom:20px}
-.badge{display:inline-block;padding:4px 12px;border-radius:99px;font-size:.82rem;
+  padding:28px 22px;width:100%;max-width:500px}
+h1{font-size:1.35rem;font-weight:700;margin-bottom:3px}
+.sub{color:var(--mt);font-size:.92rem;margin-bottom:20px}
+.badge{display:inline-block;padding:4px 12px;border-radius:99px;font-size:.88rem;
   font-weight:600;margin-bottom:16px}
 .idle{background:#2a2d3a;color:var(--mt)}
 .need_redirect{background:#1e2d2a;color:var(--gr)}
 .submitting{background:#1e2a40;color:var(--bl)}
 .done{background:#1a2e24;color:var(--gr)}
 .error{background:#2e1a1a;color:var(--rd)}
-.btn{width:100%;padding:15px;border:none;border-radius:10px;font-size:1rem;
+.btn{width:100%;padding:15px;border:none;border-radius:10px;font-size:1.05rem;
   font-weight:600;cursor:pointer;transition:opacity .15s;
   touch-action:manipulation;-webkit-tap-highlight-color:transparent;
   user-select:none;-webkit-user-select:none}
 .btn:active{opacity:.7}
-.btn-sm{padding:13px;font-size:.95rem}
+.btn-sm{padding:14px;font-size:1rem}
 .bp{background:var(--bl);color:#fff}
 .bg{background:var(--gr);color:#000}
 .bm{background:var(--bdr);color:var(--mt)}
 .url-box{background:#11131e;border:1px solid var(--bdr);border-radius:10px;
-  padding:14px;margin:14px 0;word-break:break-all;font-size:.88rem;line-height:1.6}
-.url-box a{color:var(--bl);text-decoration:none;font-size:.9rem}
-.step{font-size:.9rem;color:var(--mt);margin-top:16px;margin-bottom:6px;line-height:1.5}
+  padding:14px;margin:14px 0;word-break:break-all;font-size:.94rem;line-height:1.6}
+.url-box a{color:var(--bl);text-decoration:none;font-size:.96rem}
+.step{font-size:.96rem;color:var(--mt);margin-top:16px;margin-bottom:6px;line-height:1.5}
 .step b{color:var(--tx)}
 textarea{width:100%;padding:12px 14px;border-radius:9px;border:1px solid var(--bdr);
   background:#11131e;color:var(--tx);font-size:16px;margin:6px 0 12px;outline:none;
   display:block;resize:vertical;min-height:80px;font-family:monospace;line-height:1.5}
 textarea:focus{border-color:var(--bl)}
-.timer{font-size:.85rem;color:var(--mt);margin-bottom:12px;font-variant-numeric:tabular-nums}
+.timer{font-size:.92rem;color:var(--mt);margin-bottom:12px;font-variant-numeric:tabular-nums}
 .timer.warn strong{color:var(--rd)}
-.info-row{font-size:.82rem;color:var(--mt);margin-top:6px}
+.info-row{font-size:.88rem;color:var(--mt);margin-top:6px}
 .info-row strong{color:var(--tx)}
-.result{margin-top:14px;padding:14px 16px;border-radius:10px;font-size:.92rem;line-height:1.5}
+.result{margin-top:14px;padding:14px 16px;border-radius:10px;font-size:1rem;line-height:1.5}
 .result.done{background:#1a2e24;color:var(--gr);border:1px solid #2a4a3a}
 .result.error{background:#2e1a1a;color:var(--rd);border:1px solid #4a2a2a}
-.log-toggle{background:none;border:none;color:var(--mt);font-size:.8rem;
+.log-toggle{background:none;border:none;color:var(--mt);font-size:.88rem;
   cursor:pointer;text-decoration:underline;padding:8px 0;display:block;margin-top:16px;
   touch-action:manipulation;min-height:44px}
 .log{margin-top:8px;background:#0a0c13;border:1px solid var(--bdr);border-radius:8px;
-  padding:10px 12px;font-family:monospace;font-size:.72rem;color:var(--mt);
+  padding:10px 12px;font-family:monospace;font-size:.78rem;color:var(--mt);
   max-height:140px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;display:none}
 .spin{display:inline-block;width:13px;height:13px;border:2px solid #2a2d3a;
   border-top-color:var(--bl);border-radius:50%;animation:sp .7s linear infinite;
@@ -324,6 +348,13 @@ function render(s){
         if(s.verify.services) lines.push('<div class="info-row"><strong>Services:</strong> '+s.verify.services+'</div>');
         if(s.verify.expires_in) lines.push('<div class="info-row"><strong>Expires:</strong> '+s.verify.expires_in+'s</div>');
         vd.innerHTML=(lines.length?'<div style="color:var(--gr);font-weight:600;margin-bottom:4px">\u2713\u00a0Token check OK</div>':'')+lines.join('');
+        if(s.verify.status){
+          var st=document.createElement('div');
+          st.className='info-row';
+          st.style.cssText='margin-top:6px;white-space:pre-wrap;font-family:monospace;font-size:.78rem';
+          st.textContent=s.verify.status;
+          vd.appendChild(st);
+        }
       }
     } else {
       vd.style.display='none';
