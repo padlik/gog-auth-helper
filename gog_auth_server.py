@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 DEFAULT_PORT     = 7080
 DEFAULT_ACCOUNT  = ""
-DEFAULT_SERVICES = "user"
+DEFAULT_SERVICES = "all-user"
 DEFAULT_TTL      = 540
 
 state = {
@@ -128,7 +128,7 @@ def run_step2(account: str, services: str, redirect_url: str):
 
 def run_verify(account: str):
     """Returns (ok, result_or_error, log_lines)."""
-    cmd = ["gog", "auth", "list", account, "--check", "--json", "--no-input"]
+    cmd = ["gog", "auth", "list", "--check", "--json", "--no-input", "--account", account]
     t0 = time.time()
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
@@ -576,7 +576,7 @@ def main():
     ap.add_argument("--account",  type=str, default=DEFAULT_ACCOUNT,
                     help="Account passed to: gog auth add <ACCOUNT>")
     ap.add_argument("--services", type=str, default=DEFAULT_SERVICES,
-                    help="Passed to --services flag (default: user)")
+                    help="Passed to --services flag (default: all-user)")
     ap.add_argument("--ttl",      type=int, default=DEFAULT_TTL,
                     help="Authentication link lifetime in seconds (default: 540)")
     args = ap.parse_args()
