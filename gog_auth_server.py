@@ -14,6 +14,10 @@ Usage:
     python3 gog_auth_server.py --account me@example.com --services gmail,calendar --port 7080 --ttl 540
 """
 
+# /// script
+# requires-python = ">=3.11"
+# ///
+
 import argparse
 import json
 import os
