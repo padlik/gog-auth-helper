@@ -9,6 +9,10 @@ User=YOUR_USER
 ExecStart=uv run python /home/YOUR_USER/gog_auth_server.py --account me@example.com --services user
 # ─────────────────────────────────────────────────────────────────────────────
 
+Environment="GOG_ACCOUNT=me@example.com"
+Environment="GOG_KEYRING_BACKEND=file"
+Environment="GOG_KEYRING_PASSWORD="
+
 WorkingDirectory=/home/YOUR_USER
 Restart=on-failure
 RestartSec=5

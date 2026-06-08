@@ -35,6 +35,7 @@ state = {
     "expires_at": None,
     "log":        [],
     "result":     None,
+    "verify":     None,
 }
 _lock = threading.Lock()
 
@@ -119,6 +120,33 @@ def run_step2(account: str, services: str, redirect_url: str):
             info[k.strip()] = v.strip()
 
     return (True, info, None, log_lines)
+
+
+def run_verify(account: str):
+    """Returns (ok, result_or_error, log_lines)."""
+    cmd = ["gog", "auth", "list", account, "--check", "--json", "--no-input"]
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        log("verify", -1, "", "timeout", t0)
+        return (False, "Verification timed out", [])
+    except FileNotFoundError:
+        log("verify", -1, "", "command not found", t0)
+        return (False, "gog not found", [])
+
+    log("verify", r.returncode, r.stdout, r.stderr, t0)
+    log_lines = (r.stdout + r.stderr).strip().splitlines()
+
+    if r.returncode != 0:
+        return (False, r.stderr.strip() or r.stdout.strip() or "Verification failed", log_lines)
+
+    try:
+        data = json.loads(r.stdout.strip())
+    except json.JSONDecodeError:
+        return (False, "Could not parse verification output", log_lines)
+
+    return (True, data, log_lines)
 
 
 HTML = """<!DOCTYPE html>
@@ -223,7 +251,10 @@ textarea:focus{border-color:var(--bl)}
   <div id="panel-done" class="panel">
     <div class="result done" id="result-done"></div>
     <div id="info-done"></div>
+    <div id="verify-done" style="margin-top:14px;padding:14px 16px;border-radius:10px;
+      background:#11131e;border:1px solid var(--bdr);font-size:.85rem;line-height:1.6;display:none"></div>
     <button class="btn bp btn-sm" style="margin-top:14px" onclick="doStep1()">Auth again</button>
+    <button class="btn bm btn-sm" style="margin-top:6px" onclick="doVerify()">Check token</button>
   </div>
 
   <div id="panel-error" class="panel">
@@ -276,6 +307,23 @@ function render(s){
       if(s.info.services) info+='<div class="info-row"><strong>Services:</strong> '+s.info.services+'</div>';
     }
     document.getElementById('info-done').innerHTML=info;
+
+    var vd=document.getElementById('verify-done');
+    if(s.verify){
+      vd.style.display='block';
+      if(s.verify.error){
+        vd.innerHTML='<span style="color:var(--rd)">\u2717\u00a0Token check failed: '+s.verify.error+'</span>';
+      } else {
+        var lines=[];
+        if(s.verify.email) lines.push('<div class="info-row"><strong>Email:</strong> '+s.verify.email+'</div>');
+        if(s.verify.client) lines.push('<div class="info-row"><strong>Client:</strong> '+s.verify.client+'</div>');
+        if(s.verify.services) lines.push('<div class="info-row"><strong>Services:</strong> '+s.verify.services+'</div>');
+        if(s.verify.expires_in) lines.push('<div class="info-row"><strong>Expires:</strong> '+s.verify.expires_in+'s</div>');
+        vd.innerHTML=(lines.length?'<div style="color:var(--gr);font-weight:600;margin-bottom:4px">\u2713\u00a0Token check OK</div>':'')+lines.join('');
+      }
+    } else {
+      vd.style.display='none';
+    }
   }
   if(s.phase==='error'){
     clearTimer();
@@ -330,6 +378,15 @@ async function doStep2(){
   try{
     var r=await fetch('/step2',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    var s=await r.json();
+    render(s);
+  }catch(e){render({phase:'error',result:'Network error \u2014 check VPN connection',log:[]});}
+}
+
+async function doVerify(){
+  show('submitting');
+  try{
+    var r=await fetch('/verify',{method:'POST'});
     var s=await r.json();
     render(s);
   }catch(e){render({phase:'error',result:'Network error \u2014 check VPN connection',log:[]});}
@@ -425,6 +482,7 @@ class Handler(BaseHTTPRequestHandler):
                     state["auth_url"] = auth_url
                     state["expires_at"] = time.time() + ttl
                     state["result"] = None
+                    state["verify"] = None
             self._json(self._snapshot())
 
         elif path == "/step2":
@@ -468,30 +526,43 @@ class Handler(BaseHTTPRequestHandler):
 
             ok, info, err, logs = run_step2(account, services, redirect_url)
 
-            with _lock:
-                state["log"] = logs
-                if ok:
+            if ok:
+                v_ok, v_data, v_logs = run_verify(account)
+                logs = logs + v_logs
+                with _lock:
+                    state["log"] = logs
                     state["phase"] = "done"
                     state["result"] = "Authentication successful"
                     state["auth_url"] = None
                     state["expires_at"] = None
-                else:
+                    state["verify"] = v_data if v_ok else {"error": v_data}
+                snap = self._snapshot()
+                snap["info"] = info
+            else:
+                with _lock:
+                    state["log"] = logs
                     state["phase"] = "error"
                     state["result"] = err
                     state["auth_url"] = None
                     state["expires_at"] = None
-
-            snap = self._snapshot()
-            if ok:
-                snap["info"] = info
+                    state["verify"] = None
+                snap = self._snapshot()
             self._json(snap)
+
+        elif path == "/verify":
+            account = self.server.account
+            v_ok, v_data, v_logs = run_verify(account)
+            with _lock:
+                state["log"] = state["log"] + v_logs
+                state["verify"] = v_data if v_ok else {"error": v_data}
+            self._json(self._snapshot())
 
         else:
             self.send_error(404)
 
     def _error_snap(self, msg):
         return {"phase": "error", "result": msg, "auth_url": None,
-                "expires_at": None, "log": []}
+                "expires_at": None, "log": [], "verify": None}
 
 
 def main():
