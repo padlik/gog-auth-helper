@@ -377,7 +377,7 @@ async function doStep2(){
   var el=document.getElementById('ru');
   var url=(el?el.value:'').trim();
   if(!url){alert('Paste the redirect URL first.');return;}
-  if(!/^https?:\/\//i.test(url)){url='http://'+url;el.value=url;}
+  if(!/^https?:\\/\\//i.test(url)){url='http://'+url;el.value=url;}
   show('submitting');
   try{
     var r=await fetch('/step2',{method:'POST',
